@@ -1,0 +1,16 @@
+These are some helpers for cascading. All this work is in progress...
+
+1) cascading-maven.patch
+Pull the master of cwensel's cascading (tested with 1.0.15 & 1.0.16), and apply the patch from within the maven source folder (patch -p0 < cascading-maven.patch). 
+
+That creates a new pom.xml file, which includes the dependencies (compile & unit tests). In case you don't have some of the files that are dependencies in your repository, go to the cascading lib directory AND the hadoop lib directory and add each file you need to your local repository. You can do that for each of the jar files like this (specific example for the hadoop-test-jar which is required for the unit tests):
+
+mvn install:install-file -DgroupId=org.apache.hadoop -DartifactId=hadoop-test -Dversion=0.20.0-2787265 -Dpackaging=jar -Dfile=/path/to/jarfile/hadoop-0.20.0-20090710-1349-test.jar
+
+If you use different versions you WILL need to propagate those to the pom.xml file. Note that log4j > 1.2.13 will not work - you'll have to exclude a bunch of jmx dependencies - so i recommend using <= 1.2.13. 
+
+do "mvn clean install" and wait for the unit tests (would be good if cascading used testng instead of junit then we could easily have fast and slow tests...)
+
+2) cascading project pom
+I added a pom.xml - which you can use as a basis for any project that depends on cascading. Just create a new directory and the default maven directory structure and add this pom file - you should be good to go... 
+
