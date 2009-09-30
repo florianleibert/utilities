@@ -1,0 +1,383 @@
+diff --git a/.classpath b/.classpath
+index b846ac0..8fc11c6 100644
+--- a/.classpath
++++ b/.classpath
+@@ -20,6 +20,7 @@
+ 	<classpathentry kind="lib" path="contrib/mongodb/lib/mongo-xjdm.jar"/>
+ 	<classpathentry kind="lib" path="contrib/hadoop-store-builder/lib/commons-cli-2.0-SNAPSHOT.jar"/>
+ 	<classpathentry kind="lib" path="contrib/hadoop-store-builder/lib/hadoop-0.18.1-core.jar"/>
++	<classpathentry kind="lib" path="lib/avro-1.0.1-dev.jar"/>
+ 	<classpathentry kind="lib" path="lib/junit-4.6.jar"/>
+ 	<classpathentry kind="lib" path="lib/log4j-1.2.15.jar"/>
+ 	<classpathentry kind="lib" path="lib/jetty-6.1.18.jar"/>
+diff --git a/build.xml b/build.xml
+index ab1b07e..cd072b9 100644
+--- a/build.xml
++++ b/build.xml
+@@ -124,7 +124,7 @@
+       <arg value="--java_out=${javaout.path}"/>
+       <arg value="--python_out=${pythonout.path}"/>
+       <arg pathref="proto-files"/>
+-    </exec>
++    </exec> 
+   </target>
+ 
+   <target name="jar" depends="build" description="Build server jar file">
+diff --git a/src/java/voldemort/serialization/DefaultSerializerFactory.java b/src/java/voldemort/serialization/DefaultSerializerFactory.java
+index c4aada5..181391b 100644
+--- a/src/java/voldemort/serialization/DefaultSerializerFactory.java
++++ b/src/java/voldemort/serialization/DefaultSerializerFactory.java
+@@ -23,9 +23,12 @@ import voldemort.serialization.json.JsonTypeDefinition;
+ import voldemort.serialization.json.JsonTypeSerializer;
+ import voldemort.serialization.protobuf.ProtoBufSerializer;
+ import voldemort.serialization.thrift.ThriftSerializer;
++import voldemort.serialization.avro.AvroSerializer;
++import voldemort.serialization.avro.AvroSerializationFactory;
+ 
+ import com.facebook.thrift.TBase;
+ import com.google.protobuf.Message;
++import org.apache.avro.generic.GenericRecord;
+ 
+ /**
+  * Factory that maps serialization strings to serializers. Used to get a
+@@ -42,6 +45,7 @@ public class DefaultSerializerFactory implements SerializerFactory {
+     private static final String JSON_SERIALIZER_TYPE_NAME = "json";
+     private static final String PROTO_BUF_TYPE_NAME = "protobuf";
+     private static final String THRIFT_TYPE_NAME = "thrift";
++	private static final String AVRO_TYPE_NAME = "avro";
+ 
+     public Serializer<?> getSerializer(SerializerDefinition serializerDef) {
+         String name = serializerDef.getName();
+@@ -62,7 +66,10 @@ public class DefaultSerializerFactory implements SerializerFactory {
+             return new ProtoBufSerializer<Message>(serializerDef.getCurrentSchemaInfo());
+         } else if(name.equals(THRIFT_TYPE_NAME)) {
+             return new ThriftSerializer<TBase>(serializerDef.getCurrentSchemaInfo());
+-        } else {
++        } else if (name.equals(AVRO_TYPE_NAME)) {
++			AvroSerializationFactory factory = new AvroSerializationFactory();
++			return factory.getSerializer(serializerDef.getCurrentSchemaInfo());
++		} else {
+             throw new IllegalArgumentException("No known serializer type: "
+                                                + serializerDef.getName());
+         }
+diff --git a/src/java/voldemort/serialization/avro/AvroSchemalessSerializer.java b/src/java/voldemort/serialization/avro/AvroSchemalessSerializer.java
+index 6dd6725..e21a302 100644
+--- a/src/java/voldemort/serialization/avro/AvroSchemalessSerializer.java
++++ b/src/java/voldemort/serialization/avro/AvroSchemalessSerializer.java
+@@ -3,6 +3,7 @@ import org.apache.avro.Schema;
+ import org.apache.avro.generic.GenericDatumReader;
+ import org.apache.avro.generic.GenericDatumWriter;
+ import org.apache.avro.generic.GenericRecord;
++import org.apache.avro.generic.GenericData;
+ import org.apache.avro.io.BinaryDecoder;
+ import org.apache.avro.io.BinaryEncoder;
+ import voldemort.serialization.Serializer;
+@@ -11,21 +12,21 @@ import java.io.ByteArrayInputStream;
+ import java.io.ByteArrayOutputStream;
+ import java.io.IOException;
+ 
+-public  abstract class AvroSchemalessSerializer<T extends GenericRecord> implements Serializer<T>
++public class AvroSchemalessSerializer<T extends GenericRecord> extends AvroSerializer<T>
+ {
+-	protected Schema SCHEMA;
+ 	private GenericDatumReader reader;
+ 	private GenericDatumWriter<T> writer;
+ 
+-	public AvroSchemalessSerializer(Schema s)
++	public AvroSchemalessSerializer(Schema schema)
+ 	{
+-		this.SCHEMA = s;
++		super(schema);
+ 		reader = new GenericDatumReader();
+-		writer = new GenericDatumWriter(SCHEMA);
+-		reader.setSchema(SCHEMA);
++		writer = new GenericDatumWriter();
++		reader.setSchema(schema);
++		writer.setSchema(schema);
+ 	}
+ 
+-
++	
+ 	public byte[] toBytes(T t)
+ 	{
+ 		ByteArrayOutputStream baos = new ByteArrayOutputStream();
+@@ -42,9 +43,9 @@ public  abstract class AvroSchemalessSerializer<T extends GenericRecord> impleme
+ 		}
+ 	}
+ 
+-
+ 	public T toObject(byte[] bytes)
+ 	{
++		
+ 		try {
+ 			ByteArrayInputStream bais = new ByteArrayInputStream(bytes);
+ 			BinaryDecoder decoder = new BinaryDecoder(bais);
+diff --git a/src/java/voldemort/serialization/avro/AvroSerializationFactory.java b/src/java/voldemort/serialization/avro/AvroSerializationFactory.java
+index 42a3fd4..49e4ec9 100644
+--- a/src/java/voldemort/serialization/avro/AvroSerializationFactory.java
++++ b/src/java/voldemort/serialization/avro/AvroSerializationFactory.java
+@@ -5,55 +5,54 @@ import org.apache.avro.generic.GenericDatumWriter;
+ import org.apache.avro.generic.GenericRecord;
+ import org.apache.avro.io.BinaryDecoder;
+ import org.apache.avro.io.BinaryEncoder;
++import org.apache.log4j.Logger;
+ import voldemort.serialization.Serializer;
+ 
+ import java.io.ByteArrayInputStream;
+ import java.io.ByteArrayOutputStream;
+ import java.io.IOException;
++import java.lang.reflect.Constructor;
++import java.lang.reflect.InvocationTargetException;
+ 
+-public class AvroSerializationFactory<T extends GenericRecord> implements Serializer<T>
++public class AvroSerializationFactory
+ {
+-	private Schema SCHEMA;
+-	private GenericDatumReader reader;
+-	private GenericDatumWriter<T> writer;
+ 
+-	public AvroSerializationFactory(Schema s)
+-	{
+-		this.SCHEMA = s;
+-		reader = new GenericDatumReader();
+-		writer = new GenericDatumWriter(SCHEMA);
+-		reader.setSchema(SCHEMA);
+-	}
+-
+-
+-	public byte[] toBytes(T t)
+-	{
+-		ByteArrayOutputStream baos = new ByteArrayOutputStream();
+-		BinaryEncoder enc = new BinaryEncoder(baos);
+-		byte[] bytes = null;
++	private static Logger logger = Logger.getLogger(AvroSerializationFactory.class);
++	public AvroSerializer getSerializer(String schemaInfo) {
++		String[] parts = schemaInfo.split(";",2);
++		String clazz = parts[0].split("=")[1];
++		
++		logger.info("Using Avro serializer class:"+clazz);
+ 		try {
+-			writer.write(t, enc);
+-			bytes = baos.toByteArray();
+-			baos.close();
+-			return bytes;
++			Class serializerClass = Class.forName(clazz);
++			String schemaString = parts[1].trim();
++			AvroSerializer serializer = null;
++			//This means there is a fixed schema. This means that you cannot alter the schema at runtime however it's a bit faster
++			if (!schemaString.equals("")) {
++				logger.info("Avro schema:"+schemaString);
++				Schema s = Schema.parse(schemaString);
++				Constructor con = serializerClass.getConstructor(Schema.class);
++				serializer = (AvroSerializer)con.newInstance(s);
++			} else {
++				logger.info("Using Avro dynamic schema");
++				serializer = (AvroSerializer)serializerClass.newInstance();
++			}
++			return serializer;
+ 		}
+-		catch (IOException e) {
+-			throw new RuntimeException(e);
++		catch (ClassNotFoundException e) {
++			throw new RuntimeException("Error initializing deserializer.",e);
+ 		}
+-	}
+-
+-
+-	public T toObject(byte[] bytes)
+-	{
+-		try {
+-			ByteArrayInputStream bais = new ByteArrayInputStream(bytes);
+-			BinaryDecoder decoder = new BinaryDecoder(bais);
+-			T object = (T) reader.read(null, decoder);
+-			bais.close();
+-			return object;
++		catch (NoSuchMethodException e) {
++			throw new RuntimeException("Error initializing deserializer.",e);
++		}
++		catch (IllegalAccessException e) {
++			throw new RuntimeException("Error initializing deserializer.",e);
++		}
++		catch (InvocationTargetException e) {
++			throw new RuntimeException("Error initializing deserializer.",e);
+ 		}
+-		catch (IOException e) {
+-			throw new RuntimeException(e);
++		catch (InstantiationException e) {
++			throw new RuntimeException("Error initializing deserializer.",e);
+ 		}
+ 	}
+ }
+\ No newline at end of file
+diff --git a/src/java/voldemort/serialization/avro/RandomDataAvroShadow.java b/src/java/voldemort/serialization/avro/RandomDataAvroShadow.java
+index 093386f..69ee029 100644
+--- a/src/java/voldemort/serialization/avro/RandomDataAvroShadow.java
++++ b/src/java/voldemort/serialization/avro/RandomDataAvroShadow.java
+@@ -23,6 +23,7 @@ import org.apache.avro.generic.GenericData;
+ import org.apache.avro.generic.GenericDatumWriter;
+ import org.apache.avro.generic.GenericRecord;
+ import org.apache.avro.util.Utf8;
++import org.apache.avro.Schema;
+ 
+ import java.io.File;
+ import java.io.FileOutputStream;
+diff --git a/test/common/voldemort/VoldemortTestConstants.java b/test/common/voldemort/VoldemortTestConstants.java
+index bceb665..c4bebd3 100644
+--- a/test/common/voldemort/VoldemortTestConstants.java
++++ b/test/common/voldemort/VoldemortTestConstants.java
+@@ -42,6 +42,10 @@ public class VoldemortTestConstants {
+         return readString("config/single-store.xml");
+     }
+ 
++	public static String getAvroStoreDefinitionsXml() {
++        return readString("config/single-avro-store.xml");
++    }
++
+     public static String getNoVersionStoreDefinitionsXml() {
+         return readString("config/no-version-store.xml");
+     }
+diff --git a/test/common/voldemort/config/single-avro-store.xml b/test/common/voldemort/config/single-avro-store.xml
+index efb70ab..53d47b1 100644
+--- a/test/common/voldemort/config/single-avro-store.xml
++++ b/test/common/voldemort/config/single-avro-store.xml
+@@ -1,20 +1,22 @@
+ <?xml version="1.0"?>
+ <stores>
+-  <store>
+-    <name>test</name>
+-    <persistence>bdb</persistence>
+-    <routing>client</routing>
+-    <replication-factor>1</replication-factor>
+-    <preferred-reads>1</preferred-reads>
+-    <required-reads>1</required-reads>
+-    <preferred-writes>1</preferred-writes>
+-    <required-writes>1</required-writes>
+-    <key-serializer>
+-      <type>string</type>
+-      <schema-info>UTF-8</schema-info>
+-    </key-serializer>
+-    <value-serializer>
+-      <type>java-serialization</type>
+-    </value-serializer>
+-  </store>
++    <store>
++        <name>test</name>
++        <persistence>bdb</persistence>
++        <routing>client</routing>
++        <replication-factor>1</replication-factor>
++        <preferred-reads>1</preferred-reads>
++        <required-reads>1</required-reads>
++        <preferred-writes>1</preferred-writes>
++        <required-writes>1</required-writes>
++        <key-serializer>
++            <type>string</type>
++            <schema-info>UTF-8</schema-info>
++        </key-serializer>
++        <value-serializer>
++            <type>avro</type>
++            <schema-info version="1">java=voldemort.serialization.avro.AvroEmbeddedSchemaSerializer;{"type": "record","name": "test", "fields": [{ "name": "longField", "type": "long"},{ "name": "stringField", "type": "string"}]}
++            </schema-info>
++        </value-serializer>
++    </store>
+ </stores>
+\ No newline at end of file
+diff --git a/test/integration/voldemort/serialization/AvroSerializationIntegration.java b/test/integration/voldemort/serialization/AvroSerializationIntegration.java
+index 91cbec6..25cb4fe 100644
+--- a/test/integration/voldemort/serialization/AvroSerializationIntegration.java
++++ b/test/integration/voldemort/serialization/AvroSerializationIntegration.java
+@@ -1,5 +1,22 @@
+ package voldemort.serialization;
+ 
++import voldemort.ServerTestUtils;
++import voldemort.TestUtils;
++import voldemort.client.ClientConfig;
++import voldemort.client.HttpStoreClientFactory;
++import voldemort.client.StoreClient;
++import voldemort.cluster.Cluster;
++import voldemort.cluster.Node;
++import voldemort.server.VoldemortConfig;
++import voldemort.server.VoldemortServer;
++import voldemort.versioning.Versioned;
++
++import java.util.Arrays;
++
++import org.apache.avro.generic.GenericRecord;
++import org.apache.avro.generic.GenericData;
++import org.apache.avro.Schema;
++
+ /**
+  * User: florian
+  * Date: Sep 29, 2009
+@@ -7,4 +24,50 @@ package voldemort.serialization;
+  */
+ public class AvroSerializationIntegration
+ {
++	private static String storeName = "test-avro-serialization";
++	private static String storesXmlfile = "test/common/voldemort/config/single-avro-store.xml";
++
++	static VoldemortConfig config;
++	static VoldemortServer server;
++	static Cluster cluster;
++	static final String SCHEMA_STRING = "{\"type\": \"record\",\"name\": \"test\", \"fields\": [{ \"name\": \"longField\", \"type\": \"long\"},{ \"name\": \"stringField\", \"type\": \"string\"}]}";
++
++	public static void main(String[] args)
++	{
++		try {
++			int[] ports = ServerTestUtils.findFreePorts(2);
++			Node node0 = new Node(0, "localhost", ports[0], ports[1], Arrays.asList(new Integer[]{0,
++				1}));
++
++			ports = ServerTestUtils.findFreePorts(2);
++			Node node1 = new Node(1, "localhost", ports[0], ports[1], Arrays.asList(new Integer[]{2,
++				3}));
++
++
++			cluster = new Cluster("admin-service-test", Arrays.asList(new Node[]{node0, node1}));
++			config = ServerTestUtils.createServerConfig(0, TestUtils.createTempDir().getAbsolutePath(), null, storesXmlfile);
++
++			server = new VoldemortServer(config, cluster);
++
++			server.start();
++
++			HttpStoreClientFactory factory = new HttpStoreClientFactory(new ClientConfig().setBootstrapUrls(server.getIdentityNode().getHttpUrl()
++				.toString()));
++
++
++			// create a client that executes operations on a single store
++			StoreClient client = factory.getStoreClient("test");
++			Schema schema = Schema.parse(SCHEMA_STRING);
++			GenericRecord params =
++						new GenericData.Record(schema);
++			//finish this off... 
++
++		}
++		catch (Exception e) {
++			e.printStackTrace();
++			server.stop();
++			System.exit(1);
++		}
++
++	}
+ }
+diff --git a/test/unit/voldemort/serialization/protobuf/ProtoBufSerializerTest.java b/test/unit/voldemort/serialization/protobuf/ProtoBufSerializerTest.java
+index 6aeb7fb..d56c58d 100644
+--- a/test/unit/voldemort/serialization/protobuf/ProtoBufSerializerTest.java
++++ b/test/unit/voldemort/serialization/protobuf/ProtoBufSerializerTest.java
+@@ -19,7 +19,7 @@ public class ProtoBufSerializerTest extends TestCase {
+         }
+ 
+         @Override
+-        protected FieldAccessorTable internalGetFieldAccessorTable() {
++        protected FieldAccessorTable internalGedtFieldAccessorTable() {
+             throw new UnsupportedOperationException();
+         }
+ 
+@@ -61,7 +61,7 @@ public class ProtoBufSerializerTest extends TestCase {
+             super(bytes);
+         }
+ 
+-        public static MessageStub parseFrom(byte[] bytes) {
++        public static MessageStub parseFrom(byte[] bytes) {d
+             return new MessageStub(bytes);
+         }
+     }
