@@ -14,3 +14,9 @@ do "mvn clean install" and wait for the unit tests (would be good if cascading u
 2) cascading project pom
 I added a pom.xml - which you can use as a basis for any project that depends on cascading. Just create a new directory and the default maven directory structure and add this pom file - you should be good to go... 
 
+3) cascading extras:
+
+CompleteStatsBuffer - wrapper for the apache math-commons stats library. 
+
+Usage: 
+pipe = new Every(pipe, new CompleteStatsBuffer(new Fields("app","date","count"),new Fields("count")), Fields.RESULTS);
